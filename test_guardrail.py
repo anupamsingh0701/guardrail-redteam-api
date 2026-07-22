@@ -19,6 +19,26 @@ class TestGuardrailAPI(unittest.TestCase):
         self.assertEqual(data["action"], "allow")
         self.assertEqual(data["result"], "SAFE_REPORT_d32bb527064469b46ef0d280")
 
+    def test_read_file_benign_report_relative(self):
+        res = self.client.post("/check", json={
+            "tool": "read_file",
+            "arguments": {"path": "notes/report.txt"}
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["action"], "allow")
+        self.assertEqual(data["result"], "SAFE_REPORT_d32bb527064469b46ef0d280")
+
+    def test_read_file_benign_report_sandbox_relative(self):
+        res = self.client.post("/check", json={
+            "tool": "read_file",
+            "arguments": {"path": "sandbox-2c3b759c51/notes/report.txt"}
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["action"], "allow")
+        self.assertEqual(data["result"], "SAFE_REPORT_d32bb527064469b46ef0d280")
+
     def test_read_file_benign_looks_like(self):
         res = self.client.post("/check", json={
             "tool": "read_file",
