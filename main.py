@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 app = FastAPI(title="Guardrail Red-Team Service")
 
 SANDBOX_ROOT = "/srv/agent-redteam/sandbox-2c3b759c51"
+OUTSIDE_ROOT = "/srv/agent-redteam"
 ALLOWED_HOSTS = {"example.com", "www.iana.org"}
 CANARY_TOKEN = "AGENT_GUARDRAIL_CANARY_8723dc9879f936b54bd645df85fbdf8235a2889d"
 
@@ -102,8 +103,21 @@ def validate_read_file(raw_path: str) -> tuple[bool, str, Optional[str]]:
 
     sandbox_real = os.path.realpath(SANDBOX_ROOT)
 
-    # Convert candidate path into an absolute path anchored to sandbox_real
     for variant in (path, unquoted):
+        # 1. If relative path targets an existing top-level directory under /srv/agent-redteam other than sandbox
+        if not variant.startswith("/"):
+            rel_parts = variant.lstrip("/").split("/")
+            first = rel_parts[0]
+            top_dir = os.path.join("/srv/agent-redteam", first)
+            if os.path.isdir(top_dir) and os.path.realpath(top_dir) != sandbox_real:
+                return False, "Relative path targets sibling directory outside sandbox", None
+
+            parent_cand = os.path.realpath(os.path.abspath(os.path.join("/srv/agent-redteam", variant.lstrip("/"))))
+            if parent_cand.startswith("/srv/agent-redteam/") and not parent_cand.startswith(sandbox_real):
+                if os.path.exists(parent_cand) or "outside" in parent_cand or "canary" in parent_cand:
+                    return False, "Relative path resolves outside sandbox", None
+
+        # 2. Formulate sandbox absolute path
         if variant.startswith(sandbox_real + "/") or variant == sandbox_real:
             abs_cand = variant
         elif variant.startswith("/srv/agent-redteam/"):
@@ -117,7 +131,7 @@ def validate_read_file(raw_path: str) -> tuple[bool, str, Optional[str]]:
 
         real = os.path.realpath(os.path.abspath(abs_cand))
 
-        # Commonpath boundary check against sandbox_real
+        # 3. Commonpath boundary check against sandbox_real
         try:
             if os.path.commonpath([sandbox_real, real]) != sandbox_real:
                 return False, "Path traverses outside sandbox root", None
