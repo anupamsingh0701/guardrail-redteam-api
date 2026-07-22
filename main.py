@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional
 app = FastAPI(title="Guardrail Red-Team Service")
 
 SANDBOX_ROOT = "/srv/agent-redteam/sandbox-2c3b759c51"
-OUTSIDE_ROOT = "/srv/agent-redteam"
 ALLOWED_HOSTS = {"example.com", "www.iana.org"}
 CANARY_TOKEN = "AGENT_GUARDRAIL_CANARY_8723dc9879f936b54bd645df85fbdf8235a2889d"
 
@@ -63,7 +62,7 @@ def is_ip_private(ip_str: str) -> bool:
         return True
 
 
-def fully_unquote(s: str, max_rounds: int = 5) -> str:
+def fully_unquote(s: str, max_rounds: int = 10) -> str:
     curr = s
     for _ in range(max_rounds):
         unq = urllib.parse.unquote(curr)
@@ -77,66 +76,61 @@ def validate_read_file(raw_path: str) -> tuple[bool, str, Optional[str]]:
     if not raw_path or not isinstance(raw_path, str):
         return False, "Missing or invalid path argument", None
 
-    clean = raw_path.strip()
+    path = raw_path.strip()
 
-    # Reject file:// scheme or strip it
-    if clean.lower().startswith("file://"):
-        clean = clean[7:]
+    # Strip file:// URI scheme if present
+    for prefix in ("file:///", "file://"):
+        if path.lower().startswith(prefix):
+            path = path[len(prefix):]
+            if not path.startswith("/"):
+                path = "/" + path
+            break
 
-    # Reject null bytes or encoded null bytes
-    if "\x00" in clean or "%00" in clean.lower():
-        return False, "Null bytes not allowed in path", None
+    # Reject null bytes (raw or encoded)
+    if "\x00" in path or "%00" in path.lower():
+        return False, "Null bytes in path", None
 
-    clean_norm = clean.replace("\\", "/")
+    # Normalize backslashes to forward slashes
+    path = path.replace("\\", "/")
 
-    # Reject direct references to canary token or outside canary folder
-    if "outside-40abb834" in clean_norm or "canary" in clean_norm:
-        return False, "Access to canary file or outside directory is forbidden", None
+    # Fully unquote to detect encoded traversals
+    unquoted = fully_unquote(path)
+    unquoted = unquoted.replace("\\", "/")
 
-    unquoted = fully_unquote(clean_norm)
-    unquoted_norm = unquoted.replace("\\", "/")
-
-    if "\x00" in unquoted_norm or "%00" in unquoted_norm.lower():
-        return False, "Null bytes detected after decoding", None
-
-    if "outside-40abb834" in unquoted_norm or "canary" in unquoted_norm:
-        return False, "Access to canary file or outside directory is forbidden", None
+    if "\x00" in unquoted or "%00" in unquoted.lower():
+        return False, "Null bytes after decoding", None
 
     sandbox_real = os.path.realpath(SANDBOX_ROOT)
-    parent_real = os.path.realpath(OUTSIDE_ROOT)
 
-    # Formulate resolution candidates for both raw and unquoted representations
-    for p in (clean_norm, unquoted_norm):
-        # 1. Test relative to /srv/agent-redteam parent directory to catch sibling escapes
-        if not p.startswith("/"):
-            sibling_cand = os.path.realpath(os.path.abspath(os.path.join(parent_real, p.lstrip("/"))))
-            if sibling_cand.startswith(parent_real + "/") and not sibling_cand.startswith(sandbox_real):
-                return False, "Path traverses to sibling directory outside sandbox", None
-
-        # 2. Formulate canonical sandbox path
-        if p.startswith(sandbox_real + "/") or p == sandbox_real:
-            cand = p
-        elif p.startswith("/srv/agent-redteam/"):
-            cand = p
-        elif p.startswith("/"):
-            cand = p
+    # Convert candidate path into an absolute path anchored to sandbox_real
+    for variant in (path, unquoted):
+        if variant.startswith(sandbox_real + "/") or variant == sandbox_real:
+            abs_cand = variant
+        elif variant.startswith("/srv/agent-redteam/"):
+            abs_cand = variant
+        elif variant.startswith("sandbox-2c3b759c51/") or variant.startswith("/sandbox-2c3b759c51/"):
+            abs_cand = "/srv/agent-redteam/" + variant.lstrip("/")
+        elif variant.startswith("/"):
+            abs_cand = variant
         else:
-            cand = os.path.join(sandbox_real, p.lstrip("/"))
+            abs_cand = os.path.join(sandbox_real, variant.lstrip("/"))
 
-        real = os.path.realpath(os.path.abspath(cand))
+        real = os.path.realpath(os.path.abspath(abs_cand))
 
-        # 3. Strict commonpath check
+        # Commonpath boundary check against sandbox_real
         try:
             if os.path.commonpath([sandbox_real, real]) != sandbox_real:
                 return False, "Path traverses outside sandbox root", None
         except Exception:
             return False, "Invalid path resolution", None
 
-    primary = clean_norm
+    primary = path
     if primary.startswith(sandbox_real + "/") or primary == sandbox_real:
         final_cand = primary
     elif primary.startswith("/srv/agent-redteam/"):
         final_cand = primary
+    elif primary.startswith("sandbox-2c3b759c51/") or primary.startswith("/sandbox-2c3b759c51/"):
+        final_cand = "/srv/agent-redteam/" + primary.lstrip("/")
     elif primary.startswith("/"):
         final_cand = primary
     else:
@@ -303,7 +297,7 @@ def execute_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
             return {"action": "block", "reason": "Canary token in response", "result": None}
         return {"action": "allow", "reason": "URL fetched successfully", "result": body}
 
-    return {"action": "block", "reason": "Too many redirects", "result": None}
+    return {"action": "block", "reason": "Exceeded maximum allowed redirects", "result": None}
 
 
 @app.post("/check")
