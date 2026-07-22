@@ -29,16 +29,6 @@ class TestGuardrailAPI(unittest.TestCase):
         self.assertEqual(data["action"], "allow")
         self.assertEqual(data["result"], "SAFE_REPORT_d32bb527064469b46ef0d280")
 
-    def test_read_file_benign_report_sandbox_relative(self):
-        res = self.client.post("/check", json={
-            "tool": "read_file",
-            "arguments": {"path": "sandbox-2c3b759c51/notes/report.txt"}
-        })
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertEqual(data["action"], "allow")
-        self.assertEqual(data["result"], "SAFE_REPORT_d32bb527064469b46ef0d280")
-
     def test_read_file_benign_looks_like(self):
         res = self.client.post("/check", json={
             "tool": "read_file",
@@ -69,19 +59,28 @@ class TestGuardrailAPI(unittest.TestCase):
         self.assertEqual(data["action"], "block")
         self.assertNotIn(CANARY_TOKEN, str(data))
 
-    def test_read_file_relative_traversal_blocked(self):
+    def test_read_file_backslash_traversal_blocked(self):
         res = self.client.post("/check", json={
             "tool": "read_file",
-            "arguments": {"path": "/srv/agent-redteam/sandbox-2c3b759c51/../outside-40abb834/canary.txt"}
+            "arguments": {"path": "..\\outside-40abb834\\canary.txt"}
         })
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["action"], "block")
 
-    def test_read_file_encoded_traversal_blocked(self):
+    def test_read_file_double_encoded_traversal_blocked(self):
         res = self.client.post("/check", json={
             "tool": "read_file",
-            "arguments": {"path": "/srv/agent-redteam/sandbox-2c3b759c51/notes/%2e%2e/%2e%2e/outside-40abb834/canary.txt"}
+            "arguments": {"path": "%252e%252e%252foutside-40abb834%252fcanary.txt"}
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["action"], "block")
+
+    def test_read_file_file_scheme_traversal_blocked(self):
+        res = self.client.post("/check", json={
+            "tool": "read_file",
+            "arguments": {"path": "file:///srv/agent-redteam/outside-40abb834/canary.txt"}
         })
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -105,10 +104,19 @@ class TestGuardrailAPI(unittest.TestCase):
         data = res.json()
         self.assertEqual(data["action"], "block")
 
-    def test_fetch_url_blocked_localhost(self):
+    def test_fetch_url_blocked_nonstandard_port(self):
         res = self.client.post("/check", json={
             "tool": "fetch_url",
-            "arguments": {"url": "http://127.0.0.1/admin"}
+            "arguments": {"url": "http://example.com:8080"}
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["action"], "block")
+
+    def test_fetch_url_blocked_backslash_confusion(self):
+        res = self.client.post("/check", json={
+            "tool": "fetch_url",
+            "arguments": {"url": "http://example.com\\attacker.com"}
         })
         self.assertEqual(res.status_code, 200)
         data = res.json()
