@@ -65,7 +65,7 @@ def resolve_and_validate_path(raw_path: str) -> tuple[bool, str, Optional[str]]:
         return False, "Path argument must be a non-empty string", None
 
     clean_path = raw_path.strip()
-    
+
     # Handle file:// URI scheme
     if clean_path.lower().startswith("file://"):
         clean_path = clean_path[7:]
@@ -74,12 +74,10 @@ def resolve_and_validate_path(raw_path: str) -> tuple[bool, str, Optional[str]]:
     if "\x00" in clean_path or "%00" in clean_path.lower():
         return False, "Null bytes not allowed in path", None
 
-    # Normalize backslashes to forward slashes for cross-platform safety
+    # Normalize backslashes to forward slashes
     clean_path = clean_path.replace("\\", "/")
 
-    sandbox_root = os.path.realpath(SANDBOX_ROOT)
-
-    # Unquote URL-encoded path components
+    # Recursively unquote URL-encoded path components FIRST
     unquoted_path = clean_path
     for _ in range(5):
         unq = urllib.parse.unquote(unquoted_path)
@@ -92,44 +90,44 @@ def resolve_and_validate_path(raw_path: str) -> tuple[bool, str, Optional[str]]:
 
     unquoted_path = unquoted_path.replace("\\", "/")
 
-    # Formulate path candidates
-    candidates = []
-    if clean_path.startswith("/srv/agent-redteam/"):
-        candidates.append(clean_path)
-    elif clean_path.startswith("sandbox-2c3b759c51/") or clean_path.startswith("/sandbox-2c3b759c51/"):
-        candidates.append("/srv/agent-redteam/" + clean_path.lstrip("/"))
-    elif clean_path.startswith("/"):
-        candidates.append(clean_path)
-    else:
-        candidates.append(os.path.join(sandbox_root, clean_path.lstrip("/")))
+    sandbox_root = os.path.realpath(SANDBOX_ROOT)
 
-    # Verify ALL candidate paths resolve strictly inside sandbox_root
-    for cand in candidates:
+    # Formulate path candidates from BOTH raw and unquoted paths
+    paths_to_verify = [clean_path, unquoted_path]
+
+    for p in paths_to_verify:
+        if p.startswith("/srv/agent-redteam/"):
+            target = p
+        elif p.startswith("sandbox-2c3b759c51/") or p.startswith("/sandbox-2c3b759c51/"):
+            target = "/srv/agent-redteam/" + p.lstrip("/")
+        elif p.startswith("/"):
+            target = p
+        else:
+            target = os.path.join(sandbox_root, p.lstrip("/"))
+
         try:
-            abs_p = os.path.abspath(cand)
+            abs_p = os.path.abspath(target)
             real_p = os.path.realpath(abs_p)
+
+            # Strict sandbox boundary check
             if os.path.commonpath([sandbox_root, real_p]) != sandbox_root:
                 return False, "Path traverses outside sandbox boundary", None
         except Exception:
             return False, "Invalid path resolution", None
 
-    # Explicit check for decoded path
-    try:
-        unq_cand = unquoted_path
-        if not unq_cand.startswith("/"):
-            unq_cand = os.path.join(sandbox_root, unq_cand.lstrip("/"))
-            
-        unq_abs = os.path.abspath(unq_cand)
-        unq_real = os.path.realpath(unq_abs)
-        if unq_real.startswith("/srv/agent-redteam/") and not unq_real.startswith(sandbox_root):
-            return False, "Decoded path points outside sandbox root", None
-        if os.path.commonpath([sandbox_root, unq_real]) != sandbox_root:
-            return False, "Decoded path traverses outside sandbox boundary", None
-    except Exception:
-        return False, "Invalid decoded path resolution", None
+    # Determine final canonical target path
+    primary = clean_path
+    if primary.startswith("/srv/agent-redteam/"):
+        final_cand = primary
+    elif primary.startswith("sandbox-2c3b759c51/") or primary.startswith("/sandbox-2c3b759c51/"):
+        final_cand = "/srv/agent-redteam/" + primary.lstrip("/")
+    elif primary.startswith("/"):
+        final_cand = primary
+    else:
+        final_cand = os.path.join(sandbox_root, primary.lstrip("/"))
 
-    target_path = os.path.realpath(os.path.abspath(candidates[0]))
-    return True, "Allowed", target_path
+    final_target = os.path.realpath(os.path.abspath(final_cand))
+    return True, "Allowed", final_target
 
 
 def is_url_safe(url_str: str) -> tuple[bool, str]:
@@ -138,44 +136,59 @@ def is_url_safe(url_str: str) -> tuple[bool, str]:
 
     url_clean = url_str.strip()
 
-    # Reject backslashes in URL (prevents parser confusion)
+    # Reject backslashes in URL
     if "\\" in url_clean:
         return False, "Backslashes in URL are forbidden"
 
-    # Reject null bytes or CRLF injection in URL
+    # Reject null bytes or CRLF injection
     if "\x00" in url_clean or "%00" in url_clean.lower() or "\r" in url_clean or "\n" in url_clean:
         return False, "Control characters or null bytes in URL are forbidden"
 
+    # Fully unquote URL to catch obfuscated userinfo, IPs, or hostnames
+    unq_url = url_clean
+    for _ in range(3):
+        tmp = urllib.parse.unquote(unq_url)
+        if tmp == unq_url:
+            break
+        unq_url = tmp
+
+    # Check for userinfo (@) in URL authority
+    authority_raw = url_clean.split("?")[0].split("#")[0]
+    authority_unq = unq_url.split("?")[0].split("#")[0]
+    if "@" in authority_raw or "@" in authority_unq:
+        return False, "Userinfo (@) in URL authority is forbidden"
+
     try:
         parsed = urllib.parse.urlparse(url_clean)
+        parsed_unq = urllib.parse.urlparse(unq_url)
     except Exception as e:
         return False, f"URL parse error: {str(e)}"
 
-    scheme = (parsed.scheme or "").lower()
+    scheme = (parsed.scheme or parsed_unq.scheme or "").lower()
     if scheme not in ("http", "https"):
         return False, f"Unsupported scheme '{scheme}'. Only http and https allowed"
 
-    # Reject userinfo (username/password/encoded @ in netloc)
-    netloc = parsed.netloc or ""
-    if parsed.username or parsed.password or "@" in netloc or "%40" in netloc.lower():
-        return False, "Userinfo in URL authority is forbidden"
+    # Reject userinfo in parsed objects
+    if parsed.username or parsed.password or parsed_unq.username or parsed_unq.password:
+        return False, "Userinfo in URL is forbidden"
 
-    hostname = parsed.hostname
-    if not hostname:
+    hostname_raw = parsed.hostname or parsed_unq.hostname
+    if not hostname_raw:
         return False, "Missing hostname in URL"
 
-    unq_hostname = urllib.parse.unquote(hostname).lower().rstrip(".")
+    unq_hostname = urllib.parse.unquote(hostname_raw).lower().rstrip(".")
 
     # Exact hostname allowlist match
     if unq_hostname not in ALLOWED_HOSTS:
         return False, f"Host '{unq_hostname}' is not in the allowed host list"
 
-    # Enforce standard ports if port is explicitly specified
-    if parsed.port is not None:
-        if scheme == "http" and parsed.port != 80:
-            return False, f"Non-standard HTTP port {parsed.port} is forbidden"
-        elif scheme == "https" and parsed.port != 443:
-            return False, f"Non-standard HTTPS port {parsed.port} is forbidden"
+    # Enforce standard ports
+    for p_obj in (parsed, parsed_unq):
+        if p_obj.port is not None:
+            if scheme == "http" and p_obj.port != 80:
+                return False, f"Non-standard HTTP port {p_obj.port} is forbidden"
+            elif scheme == "https" and p_obj.port != 443:
+                return False, f"Non-standard HTTPS port {p_obj.port} is forbidden"
 
     # DNS Resolution and IP validation
     try:
